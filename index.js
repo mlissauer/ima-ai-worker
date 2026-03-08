@@ -428,9 +428,9 @@ Return ONLY a JSON array (or [] if nothing found):
 
 const PORT = process.env.PORT || 3001;
 
-app.listen(PORT, () => {
-  console.log(`GroupCal Worker running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`IMA AI Worker running on port ${PORT}`);
+  console.log(`Health check: http://0.0.0.0:${PORT}/health`);
 });
 
 // Graceful shutdown
