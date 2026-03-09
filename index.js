@@ -178,8 +178,9 @@ async function startBaileysSession(userId, dbUserId) {
 
       const jid = msg.key.remoteJid;
       const isGroup = jid?.endsWith("@g.us");
-      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
-      console.log(`[${userId}] Message from ${jid} (group: ${isGroup}, len: ${text.length}): ${text.slice(0, 80)}`);
+
+      // Only process and log group messages — skip private chats entirely
+      if (!isGroup) continue;
 
       try {
         await handleIncomingMessage(dbUserId, sock, msg);
@@ -439,10 +440,7 @@ async function handleIncomingMessage(userId, sock, msg) {
   const jid = msg.key.remoteJid;
 
   // Only process group messages
-  if (!jid || !jid.endsWith("@g.us")) {
-    console.log(`[${userId}] Skipping non-group message from ${jid}`);
-    return;
-  }
+  if (!jid || !jid.endsWith("@g.us")) return;
 
   const groupId = jid;
 
