@@ -169,13 +169,19 @@ async function startBaileysSession(userId, dbUserId) {
 
   // Incoming messages
   sock.ev.on("messages.upsert", async ({ messages: msgs, type }) => {
+    console.log(`[${userId}] messages.upsert: type=${type}, count=${msgs.length}`);
     if (type !== "notify") return; // Only process new messages
 
     for (const msg of msgs) {
       if (!msg.message || msg.key.fromMe) continue;
 
+      const jid = msg.key.remoteJid;
+      const isGroup = jid?.endsWith("@g.us");
+      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+      console.log(`[${userId}] Message from ${jid} (group: ${isGroup}, len: ${text.length}): ${text.slice(0, 80)}`);
+
       try {
-        await handleIncomingMessage(userId, sock, msg);
+        await handleIncomingMessage(dbUserId, sock, msg);
       } catch (err) {
         console.error(`[${userId}] Error processing message:`, err.message);
       }
@@ -432,7 +438,10 @@ async function handleIncomingMessage(userId, sock, msg) {
   const jid = msg.key.remoteJid;
 
   // Only process group messages
-  if (!jid || !jid.endsWith("@g.us")) return;
+  if (!jid || !jid.endsWith("@g.us")) {
+    console.log(`[${userId}] Skipping non-group message from ${jid}`);
+    return;
+  }
 
   const groupId = jid;
 
@@ -441,13 +450,21 @@ async function handleIncomingMessage(userId, sock, msg) {
     where: { whatsappGroupId: groupId },
   });
 
-  if (!dbGroup) return;
+  if (!dbGroup) {
+    console.log(`[${userId}] Group ${groupId} not found in DB, skipping`);
+    return;
+  }
 
   const monitoringMembers = await prisma.groupMembership.findMany({
     where: { groupId: dbGroup.id, isActive: true, isMonitored: true },
   });
 
-  if (monitoringMembers.length === 0) return;
+  console.log(`[${userId}] Group "${dbGroup.name}": ${monitoringMembers.length} monitoring members`);
+
+  if (monitoringMembers.length === 0) {
+    console.log(`[${userId}] No monitoring members for "${dbGroup.name}", skipping`);
+    return;
+  }
 
   // Extract message text
   const messageText =
@@ -455,7 +472,13 @@ async function handleIncomingMessage(userId, sock, msg) {
     msg.message?.extendedTextMessage?.text ||
     "";
 
-  if (!messageText || messageText.length < 10) return;
+  if (!messageText || messageText.length < 10) {
+    console.log(`[${userId}] Message too short (${messageText.length} chars), skipping`);
+    return;
+  }
+
+  console.log(`[${userId}] Processing message in "${dbGroup.name}": "${messageText.slice(0, 100)}"`);
+
 
   // Get sender info
   const senderJid = msg.key.participant || msg.key.remoteJid;
@@ -485,11 +508,14 @@ async function handleIncomingMessage(userId, sock, msg) {
   });
 
   // Run AI parsing
+  console.log(`[${userId}] Running AI parsing on ${recentMessages.length} messages from "${dbGroup.name}"...`);
   const events = await parseWithAI(
     recentMessages.reverse(),
     dbGroup.name,
     storedMessage.id
   );
+
+  console.log(`[${userId}] AI detected ${events.length} event(s) in "${dbGroup.name}"`);
 
   if (events.length === 0) {
     await prisma.whatsAppMessage.update({
