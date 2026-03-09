@@ -62,7 +62,8 @@ function authMiddleware(req, res, next) {
 
 // ─── Baileys Session Management ─────────────────────────────────────
 
-async function startBaileysSession(userId) {
+async function startBaileysSession(userId, dbUserId) {
+  dbUserId = dbUserId || userId;
   const authDir = path.join(AUTH_DIR, userId);
   if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
 
@@ -113,8 +114,8 @@ async function startBaileysSession(userId) {
       // Delay slightly to let Baileys finish init queries
       setTimeout(async () => {
         try {
-          await syncGroups(userId, sock);
-          console.log(`[${userId}] Group sync completed successfully`);
+          await syncGroups(dbUserId, sock);
+          console.log(`[${userId}] Group sync completed successfully (dbUserId: ${dbUserId})`);
         } catch (err) {
           console.error(`[${userId}] Error syncing groups:`, err.message);
         }
@@ -239,20 +240,56 @@ app.post("/sessions/:userId/start", authMiddleware, async (req, res) => {
 
   // Ensure user exists in database before doing anything
   try {
-    await prisma.user.upsert({
-      where: { id: userId },
-      update: { name: name || undefined, image: image || undefined },
-      create: {
-        id: userId,
-        email: email || null,
-        name: name || null,
-        image: image || null,
-      },
-    });
-    console.log(`[${userId}] User ensured in DB (email: ${email})`);
+    // Check if user already exists by ID
+    let dbUser = await prisma.user.findUnique({ where: { id: userId } });
+
+    if (!dbUser && email) {
+      // Maybe user exists with same email but different ID (from old auth setup)
+      const existingByEmail = await prisma.user.findUnique({ where: { email } });
+      if (existingByEmail) {
+        // Update existing user's references won't work (PK change),
+        // so just use existing user — but we need to map userId for group sync
+        console.log(`[${userId}] Found existing user by email with id ${existingByEmail.id}`);
+        dbUser = existingByEmail;
+        // Store mapping so syncGroups uses correct DB userId
+        req.dbUserId = existingByEmail.id;
+      }
+    }
+
+    if (!dbUser) {
+      // Create new user — avoid email conflict by setting email to null if needed
+      try {
+        dbUser = await prisma.user.create({
+          data: {
+            id: userId,
+            email: email || null,
+            name: name || null,
+            image: image || null,
+          },
+        });
+        console.log(`[${userId}] Created user in DB (email: ${email})`);
+      } catch (createErr) {
+        // If email unique constraint fails, create without email
+        console.log(`[${userId}] Create with email failed, trying without: ${createErr.message}`);
+        dbUser = await prisma.user.create({
+          data: {
+            id: userId,
+            name: name || null,
+            image: image || null,
+          },
+        });
+        console.log(`[${userId}] Created user in DB (no email)`);
+      }
+    } else {
+      console.log(`[${userId}] User already exists in DB (id: ${dbUser.id})`);
+    }
+
+    // Store the actual DB userId for syncGroups
+    if (!req.dbUserId) req.dbUserId = dbUser.id;
   } catch (err) {
-    console.error(`[${userId}] Failed to upsert user:`, err.message);
-    // Continue anyway — user might already exist
+    console.error(`[${userId}] Failed to ensure user:`, err.message);
+    // Last resort: just use userId as-is
+    req.dbUserId = userId;
   }
 
   // Don't create duplicate sessions
@@ -269,10 +306,11 @@ app.post("/sessions/:userId/start", authMiddleware, async (req, res) => {
     }
   }
 
-  console.log(`[${userId}] Starting new WhatsApp session...`);
+  const dbUserId = req.dbUserId || userId;
+  console.log(`[${userId}] Starting new WhatsApp session... (dbUserId: ${dbUserId})`);
 
   try {
-    const sessionData = await startBaileysSession(userId);
+    const sessionData = await startBaileysSession(userId, dbUserId);
     res.json({ status: sessionData.status });
   } catch (err) {
     console.error(`[${userId}] Failed to start session:`, err.message);
