@@ -119,22 +119,44 @@ async function startBaileysSession(userId) {
     if (connection === "close") {
       const statusCode =
         lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+      // Treat 405, 401, 403, and loggedOut as "need fresh QR"
+      const needsFreshStart =
+        statusCode === DisconnectReason.loggedOut ||
+        statusCode === 405 ||
+        statusCode === 401 ||
+        statusCode === 403;
 
       console.log(
-        `[${userId}] Connection closed. Status: ${statusCode}. Reconnect: ${shouldReconnect}`
+        `[${userId}] Connection closed. Status: ${statusCode}. NeedsFreshStart: ${needsFreshStart}`
       );
 
-      if (shouldReconnect) {
-        // Reconnect
-        sessionData.status = "reconnecting";
-        await startBaileysSession(userId);
-      } else {
-        // Logged out — clean up
+      if (needsFreshStart) {
+        // Clear bad credentials and stop — user must click Connect again
+        console.log(`[${userId}] Clearing credentials for fresh QR on next connect`);
         sessionData.status = "disconnected";
         sessions.delete(userId);
-        // Remove auth files so next connect shows QR
         fs.rmSync(authDir, { recursive: true, force: true });
+      } else if (statusCode !== undefined) {
+        // Temporary disconnect — reconnect (max 3 attempts)
+        const attempts = sessionData.reconnectAttempts || 0;
+        if (attempts < 3) {
+          sessionData.reconnectAttempts = attempts + 1;
+          sessionData.status = "reconnecting";
+          console.log(`[${userId}] Reconnecting (attempt ${attempts + 1}/3)...`);
+          // Delay before reconnect to avoid hammering
+          await new Promise((r) => setTimeout(r, 2000));
+          await startBaileysSession(userId);
+        } else {
+          console.log(`[${userId}] Max reconnect attempts reached. Cleaning up.`);
+          sessionData.status = "disconnected";
+          sessions.delete(userId);
+          fs.rmSync(authDir, { recursive: true, force: true });
+        }
+      } else {
+        // Unknown disconnect — clean up
+        sessionData.status = "disconnected";
+        sessions.delete(userId);
       }
     }
   });
@@ -481,6 +503,13 @@ Return ONLY a JSON array (or [] if nothing found):
 // ─── Start ──────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3001;
+
+// Clean up any stale auth files on startup
+if (fs.existsSync(AUTH_DIR)) {
+  fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  console.log("Cleared stale auth files on startup");
+}
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`IMA AI Worker running on port ${PORT}`);
