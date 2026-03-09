@@ -381,6 +381,51 @@ app.get("/health", (req, res) => {
   });
 });
 
+/**
+ * GET /debug-db/:userId — Check if user exists and try to create
+ */
+app.get("/debug-db/:userId", async (req, res) => {
+  const { userId } = req.params;
+  const results = {};
+
+  try {
+    // Check if user exists
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    results.userExists = !!user;
+    results.user = user ? { id: user.id, email: user.email, name: user.name } : null;
+
+    // Count all users
+    const userCount = await prisma.user.count();
+    results.totalUsers = userCount;
+
+    // List all user IDs
+    const allUsers = await prisma.user.findMany({ select: { id: true, email: true }, take: 10 });
+    results.allUsers = allUsers;
+
+    // Try raw SQL insert if user doesn't exist
+    if (!user) {
+      try {
+        await prisma.$executeRawUnsafe(
+          `INSERT INTO "User" (id, name, "createdAt", "updatedAt") VALUES ($1, $2, NOW(), NOW()) ON CONFLICT (id) DO NOTHING`,
+          userId, "Test User"
+        );
+        results.rawInsert = "success";
+
+        // Verify
+        const check = await prisma.user.findUnique({ where: { id: userId } });
+        results.userExistsAfterInsert = !!check;
+      } catch (insertErr) {
+        results.rawInsert = "failed";
+        results.rawInsertError = insertErr.message;
+      }
+    }
+  } catch (err) {
+    results.error = err.message;
+  }
+
+  res.json(results);
+});
+
 // ─── Message Processing ─────────────────────────────────────────────
 
 async function handleIncomingMessage(userId, sock, msg) {
