@@ -238,58 +238,49 @@ app.post("/sessions/:userId/start", authMiddleware, async (req, res) => {
   const { userId } = req.params;
   const { email, name, image } = req.body || {};
 
-  // Ensure user exists in database before doing anything
+  // Ensure user exists in database using raw SQL (most reliable)
+  let dbUserId = userId;
   try {
-    // Check if user already exists by ID
-    let dbUser = await prisma.user.findUnique({ where: { id: userId } });
+    console.log(`[${userId}] Ensuring user exists... (email: ${email}, name: ${name})`);
 
-    if (!dbUser && email) {
-      // Maybe user exists with same email but different ID (from old auth setup)
-      const existingByEmail = await prisma.user.findUnique({ where: { email } });
-      if (existingByEmail) {
-        // Update existing user's references won't work (PK change),
-        // so just use existing user — but we need to map userId for group sync
-        console.log(`[${userId}] Found existing user by email with id ${existingByEmail.id}`);
-        dbUser = existingByEmail;
-        // Store mapping so syncGroups uses correct DB userId
-        req.dbUserId = existingByEmail.id;
+    // Use raw SQL INSERT ... ON CONFLICT to handle all edge cases
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "User" (id, email, name, image, "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, $4, NOW(), NOW())
+       ON CONFLICT (id) DO UPDATE SET name = COALESCE($3, "User".name), "updatedAt" = NOW()`,
+      userId, email || null, name || null, image || null
+    );
+    console.log(`[${userId}] User ensured in DB via raw SQL`);
+  } catch (rawErr) {
+    console.error(`[${userId}] Raw SQL user insert failed:`, rawErr.message);
+
+    // If it failed due to email conflict, try without email
+    try {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "User" (id, name, image, "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, NOW(), NOW())
+         ON CONFLICT (id) DO UPDATE SET name = COALESCE($2, "User".name), "updatedAt" = NOW()`,
+        userId, name || null, image || null
+      );
+      console.log(`[${userId}] User ensured in DB (without email)`);
+    } catch (fallbackErr) {
+      console.error(`[${userId}] Fallback user insert also failed:`, fallbackErr.message);
+
+      // Last resort: check if user exists with same email, use their ID
+      if (email) {
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT id FROM "User" WHERE email = $1 LIMIT 1`, email
+          );
+          if (rows && rows.length > 0) {
+            dbUserId = rows[0].id;
+            console.log(`[${userId}] Found existing user by email, using dbUserId: ${dbUserId}`);
+          }
+        } catch (lookupErr) {
+          console.error(`[${userId}] Email lookup also failed:`, lookupErr.message);
+        }
       }
     }
-
-    if (!dbUser) {
-      // Create new user — avoid email conflict by setting email to null if needed
-      try {
-        dbUser = await prisma.user.create({
-          data: {
-            id: userId,
-            email: email || null,
-            name: name || null,
-            image: image || null,
-          },
-        });
-        console.log(`[${userId}] Created user in DB (email: ${email})`);
-      } catch (createErr) {
-        // If email unique constraint fails, create without email
-        console.log(`[${userId}] Create with email failed, trying without: ${createErr.message}`);
-        dbUser = await prisma.user.create({
-          data: {
-            id: userId,
-            name: name || null,
-            image: image || null,
-          },
-        });
-        console.log(`[${userId}] Created user in DB (no email)`);
-      }
-    } else {
-      console.log(`[${userId}] User already exists in DB (id: ${dbUser.id})`);
-    }
-
-    // Store the actual DB userId for syncGroups
-    if (!req.dbUserId) req.dbUserId = dbUser.id;
-  } catch (err) {
-    console.error(`[${userId}] Failed to ensure user:`, err.message);
-    // Last resort: just use userId as-is
-    req.dbUserId = userId;
   }
 
   // Don't create duplicate sessions
@@ -306,7 +297,6 @@ app.post("/sessions/:userId/start", authMiddleware, async (req, res) => {
     }
   }
 
-  const dbUserId = req.dbUserId || userId;
   console.log(`[${userId}] Starting new WhatsApp session... (dbUserId: ${dbUserId})`);
 
   try {
