@@ -173,7 +173,8 @@ async function startBaileysSession(userId, dbUserId) {
     if (type !== "notify") return; // Only process new messages
 
     for (const msg of msgs) {
-      if (!msg.message || msg.key.fromMe) continue;
+      if (!msg.message) continue;
+      // Note: allowing fromMe messages for now (so user can test with own messages)
 
       const jid = msg.key.remoteJid;
       const isGroup = jid?.endsWith("@g.us");
