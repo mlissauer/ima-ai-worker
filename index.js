@@ -109,12 +109,16 @@ async function startBaileysSession(userId) {
       sessionData.status = "connected";
       sessionData.qrCode = null;
 
-      // Fetch groups and store in database
-      try {
-        await syncGroups(userId, sock);
-      } catch (err) {
-        console.error(`[${userId}] Error syncing groups:`, err.message);
-      }
+      // Fetch groups and store in database (async, don't block status)
+      // Delay slightly to let Baileys finish init queries
+      setTimeout(async () => {
+        try {
+          await syncGroups(userId, sock);
+          console.log(`[${userId}] Group sync completed successfully`);
+        } catch (err) {
+          console.error(`[${userId}] Error syncing groups:`, err.message);
+        }
+      }, 5000);
     }
 
     if (connection === "close") {
@@ -189,22 +193,21 @@ async function syncGroups(userId, sock) {
 
   console.log(`[${userId}] Found ${groupList.length} groups`);
 
+  let synced = 0;
+  let errors = 0;
+
   for (const group of groupList) {
-    await prisma.whatsAppGroup.upsert({
-      where: { whatsappGroupId: group.id },
-      update: { name: group.subject },
-      create: {
-        whatsappGroupId: group.id,
-        name: group.subject,
-        description: group.desc || null,
-      },
-    });
+    try {
+      const dbGroup = await prisma.whatsAppGroup.upsert({
+        where: { whatsappGroupId: group.id },
+        update: { name: group.subject },
+        create: {
+          whatsappGroupId: group.id,
+          name: group.subject,
+          description: group.desc || null,
+        },
+      });
 
-    const dbGroup = await prisma.whatsAppGroup.findUnique({
-      where: { whatsappGroupId: group.id },
-    });
-
-    if (dbGroup) {
       await prisma.groupMembership.upsert({
         where: {
           userId_groupId: { userId, groupId: dbGroup.id },
@@ -212,8 +215,17 @@ async function syncGroups(userId, sock) {
         update: { isActive: true },
         create: { userId, groupId: dbGroup.id, isMonitored: false },
       });
+
+      synced++;
+    } catch (err) {
+      errors++;
+      if (errors <= 3) {
+        console.error(`[${userId}] Error syncing group "${group.subject}":`, err.message);
+      }
     }
   }
+
+  console.log(`[${userId}] Synced ${synced}/${groupList.length} groups (${errors} errors)`);
 }
 
 // ─── API Endpoints ──────────────────────────────────────────────────
@@ -223,6 +235,25 @@ async function syncGroups(userId, sock) {
  */
 app.post("/sessions/:userId/start", authMiddleware, async (req, res) => {
   const { userId } = req.params;
+  const { email, name, image } = req.body || {};
+
+  // Ensure user exists in database before doing anything
+  try {
+    await prisma.user.upsert({
+      where: { id: userId },
+      update: { name: name || undefined, image: image || undefined },
+      create: {
+        id: userId,
+        email: email || null,
+        name: name || null,
+        image: image || null,
+      },
+    });
+    console.log(`[${userId}] User ensured in DB (email: ${email})`);
+  } catch (err) {
+    console.error(`[${userId}] Failed to upsert user:`, err.message);
+    // Continue anyway — user might already exist
+  }
 
   // Don't create duplicate sessions
   if (sessions.has(userId)) {
