@@ -251,14 +251,35 @@ app.post("/sessions/:userId/start", authMiddleware, async (req, res) => {
   const { userId } = req.params;
   const { email, name, image, googleAccessToken, googleRefreshToken } = req.body || {};
 
-  // Store Google OAuth tokens for auto calendar invites
+  // Store Google OAuth tokens in DB (CalendarLink) so they survive restarts
   if (googleAccessToken) {
-    userTokens.set(userId, {
-      email: email || null,
-      accessToken: googleAccessToken,
-      refreshToken: googleRefreshToken || null,
-    });
-    console.log(`[${userId}] Stored Google OAuth tokens for auto calendar invites (email: ${email})`);
+    try {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "CalendarLink" (id, "userId", provider, "accessToken", "refreshToken", "isActive", "createdAt", "updatedAt")
+         VALUES (gen_random_uuid()::text, $1, 'GOOGLE', $2, $3, true, NOW(), NOW())
+         ON CONFLICT ("userId", provider) DO UPDATE SET
+           "accessToken" = $2,
+           "refreshToken" = COALESCE($3, "CalendarLink"."refreshToken"),
+           "isActive" = true,
+           "updatedAt" = NOW()`,
+        dbUserId, googleAccessToken, googleRefreshToken || null
+      );
+      // Also cache in memory for fast access
+      userTokens.set(dbUserId, {
+        email: email || null,
+        accessToken: googleAccessToken,
+        refreshToken: googleRefreshToken || null,
+      });
+      console.log(`[${userId}] Stored Google OAuth tokens in DB + memory (email: ${email})`);
+    } catch (tokenErr) {
+      console.error(`[${userId}] Failed to store Google tokens:`, tokenErr.message);
+      // Still cache in memory as fallback
+      userTokens.set(dbUserId, {
+        email: email || null,
+        accessToken: googleAccessToken,
+        refreshToken: googleRefreshToken || null,
+      });
+    }
   }
 
   // Ensure user exists in database using raw SQL (most reliable)
@@ -591,9 +612,31 @@ const EVENT_COLORS = {
 };
 
 async function sendCalendarInvite(userId, event, groupName) {
-  const tokens = userTokens.get(userId);
+  let tokens = userTokens.get(userId);
+
+  // If not in memory, load from DB
   if (!tokens || !tokens.accessToken) {
-    console.log(`[${userId}] No Google tokens stored, skipping calendar invite`);
+    try {
+      const link = await prisma.calendarLink.findUnique({
+        where: { userId_provider: { userId, provider: "GOOGLE" } },
+      });
+      if (link && link.accessToken) {
+        const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+        tokens = {
+          email: user?.email || null,
+          accessToken: link.accessToken,
+          refreshToken: link.refreshToken || null,
+        };
+        userTokens.set(userId, tokens);
+        console.log(`[${userId}] Loaded Google tokens from DB`);
+      }
+    } catch (dbErr) {
+      console.error(`[${userId}] Failed to load tokens from DB:`, dbErr.message);
+    }
+  }
+
+  if (!tokens || !tokens.accessToken) {
+    console.log(`[${userId}] No Google tokens available, skipping calendar invite`);
     return null;
   }
 
@@ -614,6 +657,12 @@ async function sendCalendarInvite(userId, event, groupName) {
         const { credentials } = await oauth2Client.refreshAccessToken();
         tokens.accessToken = credentials.access_token;
         userTokens.set(userId, tokens);
+        // Persist refreshed token to DB
+        await prisma.$executeRawUnsafe(
+          `UPDATE "CalendarLink" SET "accessToken" = $1, "updatedAt" = NOW()
+           WHERE "userId" = $2 AND provider = 'GOOGLE'`,
+          credentials.access_token, userId
+        ).catch(() => {});
       } catch (refreshErr) {
         console.warn(`[${userId}] Token refresh failed, using existing:`, refreshErr.message);
       }
