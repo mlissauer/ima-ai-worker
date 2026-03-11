@@ -492,12 +492,12 @@ async function handleIncomingMessage(userId, sock, msg) {
     where: { groupId: dbGroup.id, isActive: true, isMonitored: true },
   });
 
-  console.log(`[${userId}] Group "${dbGroup.name}": ${monitoringMembers.length} monitoring members`);
-
   if (monitoringMembers.length === 0) {
-    console.log(`[${userId}] No monitoring members for "${dbGroup.name}", skipping`);
+    // Silently skip groups that aren't being monitored
     return;
   }
+
+  console.log(`[${userId}] Group "${dbGroup.name}": ${monitoringMembers.length} monitoring members`);
 
   // Extract message text
   const messageText =
@@ -639,9 +639,11 @@ async function sendCalendarInvite(userId, event, groupName) {
   }
 
   try {
+    const redirectUri = (process.env.FRONTEND_URL || 'https://ima-ai.vercel.app') + '/api/auth/callback/google';
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET
+      process.env.GOOGLE_CLIENT_SECRET,
+      redirectUri
     );
 
     oauth2Client.setCredentials({
