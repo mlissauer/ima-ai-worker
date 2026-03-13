@@ -314,7 +314,7 @@ app.post("/sessions/:userId/start", authMiddleware, async (req, res) => {
         accessToken: googleAccessToken,
         refreshToken: googleRefreshToken || null,
       });
-      console.log(`[${userId}] Stored Google OAuth tokens in DB + memory (email: ${email})`);
+      console.log(`[${userId}] Stored Google OAuth tokens in DB + memory (email: ${email}, hasRefresh: ${!!googleRefreshToken})`);
     } catch (tokenErr) {
       console.error(`[${userId}] Failed to store Google tokens:`, tokenErr.message);
       userTokens.set(dbUserId, {
@@ -639,33 +639,40 @@ async function sendCalendarInvite(userId, event, groupName) {
   }
 
   try {
-    const redirectUri = (process.env.FRONTEND_URL || 'https://ima-ai.vercel.app') + '/api/auth/callback/google';
+    // DO NOT pass redirect URI — it's not needed for token refresh and causes invalid_request errors
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      redirectUri
+      process.env.GOOGLE_CLIENT_SECRET
     );
 
-    oauth2Client.setCredentials({
-      access_token: tokens.accessToken,
-      refresh_token: tokens.refreshToken || undefined,
-    });
-
-    // Try to refresh token if we have a refresh token
+    // Always try refresh token first if available (access tokens expire after ~1hr)
     if (tokens.refreshToken) {
       try {
+        oauth2Client.setCredentials({ refresh_token: tokens.refreshToken });
         const { credentials } = await oauth2Client.refreshAccessToken();
+        console.log(`[${userId}] Token refreshed successfully`);
         tokens.accessToken = credentials.access_token;
+        if (credentials.refresh_token) {
+          tokens.refreshToken = credentials.refresh_token;
+        }
         userTokens.set(userId, tokens);
         // Persist refreshed token to DB
         await prisma.$executeRawUnsafe(
-          `UPDATE "CalendarLink" SET "accessToken" = $1, "updatedAt" = NOW()
+          `UPDATE "CalendarLink" SET "accessToken" = $1, "refreshToken" = COALESCE($3, "CalendarLink"."refreshToken"), "updatedAt" = NOW()
            WHERE "userId" = $2 AND provider = 'GOOGLE'`,
-          credentials.access_token, userId
+          credentials.access_token, userId, credentials.refresh_token || null
         ).catch(() => {});
       } catch (refreshErr) {
-        console.warn(`[${userId}] Token refresh failed, using existing:`, refreshErr.message);
+        console.warn(`[${userId}] Token refresh failed:`, refreshErr.message);
+        // Fall back to existing access token
+        oauth2Client.setCredentials({
+          access_token: tokens.accessToken,
+          refresh_token: tokens.refreshToken,
+        });
       }
+    } else {
+      // No refresh token, use access token directly (may be expired)
+      oauth2Client.setCredentials({ access_token: tokens.accessToken });
     }
 
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
@@ -823,7 +830,7 @@ if (fs.existsSync(AUTH_DIR)) {
 }
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`IMA AI Worker v2.2 running on port ${PORT}`);
+  console.log(`IMA AI Worker v2.3 running on port ${PORT}`);
   console.log(`Engine: Baileys | Auto-calendar: enabled`);
   console.log(`Health check: http://0.0.0.0:${PORT}/health`);
 });
