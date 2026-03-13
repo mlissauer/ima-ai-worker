@@ -633,10 +633,23 @@ async function sendCalendarInvite(userId, event, groupName) {
     }
   }
 
+  // Ensure we have the user's email for attendee
+  if (tokens && !tokens.email) {
+    try {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+      if (user?.email) {
+        tokens.email = user.email;
+        userTokens.set(userId, tokens);
+      }
+    } catch (e) {}
+  }
+
   if (!tokens || !tokens.accessToken) {
     console.log(`[${userId}] No Google tokens available, skipping calendar invite`);
     return null;
   }
+
+  console.log(`[${userId}] Sending calendar invite: "${event.title}" (email: ${tokens.email || "NONE"}, hasRefresh: ${!!tokens.refreshToken})`);
 
   try {
     // DO NOT pass redirect URI — it's not needed for token refresh and causes invalid_request errors
@@ -702,7 +715,7 @@ async function sendCalendarInvite(userId, event, groupName) {
           timeZone: "Asia/Jerusalem",
         },
         location: event.location || undefined,
-        attendees: tokens.email ? [{ email: tokens.email, responseStatus: "needsAction" }] : undefined,
+        attendees: tokens.email ? [{ email: tokens.email }] : undefined,
         reminders: {
           useDefault: false,
           overrides: [
@@ -714,10 +727,14 @@ async function sendCalendarInvite(userId, event, groupName) {
       },
     });
 
-    console.log(`[${userId}] Calendar invite sent: "${event.title}" (id: ${res.data.id})`);
+    console.log(`[${userId}] Calendar invite sent: "${event.title}" (id: ${res.data.id}, attendee: ${tokens.email || "NONE"}, htmlLink: ${res.data.htmlLink || "N/A"})`);
     return res.data.id;
   } catch (err) {
     console.error(`[${userId}] Calendar invite failed:`, err.message);
+    // Log more details for debugging
+    if (err.response) {
+      console.error(`[${userId}] Calendar API error details:`, JSON.stringify(err.response.data || {}).slice(0, 300));
+    }
     return null;
   }
 }
@@ -830,7 +847,7 @@ if (fs.existsSync(AUTH_DIR)) {
 }
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`IMA AI Worker v2.3 running on port ${PORT}`);
+  console.log(`IMA AI Worker v2.4 running on port ${PORT}`);
   console.log(`Engine: Baileys | Auto-calendar: enabled`);
   console.log(`Health check: http://0.0.0.0:${PORT}/health`);
 });
